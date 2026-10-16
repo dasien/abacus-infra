@@ -187,7 +187,8 @@ def full(lane=None):
             out.append("Needs you: nothing")
         out.append(f"Program: {status or 'no page yet'}")
         mine = {f"agent:orchestrator-{lane}"} | {f"coder:{r.rsplit('/', 1)[-1]}" for r in info["repos"]}
-        sessions = [s for s in live_sessions() if s["name"] in mine or s["name"].startswith(f"agent:orchestrator-{lane}-g")]
+        sessions = [s for s in live_sessions()
+                    if s["name"] in mine or s["name"].startswith(f"agent:orchestrator-{lane}-g")]
     else:
         pages = all_decisions()
         needs = [(l, c) for l, (_, cs) in pages.items() for c in cs]
@@ -208,7 +209,8 @@ def full(lane=None):
         sessions = live_sessions()
     if lb["flight"]:
         out.append("In flight:")
-        out += [f"  - {d['bead']} @ {d['worker']}: {d['status']}" + (f" [{d['lane']}]" if d.get("lane") and not lane else "")
+        out += [f"  - {d['bead']} @ {d['worker']}: {d['status']}"
+                + (f" [{d['lane']}]" if d.get("lane") and not lane else "")
                 + (f" (verified {d['verified_commit'][:8]})" if d.get("verified_commit") else "") for d in lb["flight"]]
     else:
         out.append("In flight: nothing")
