@@ -395,8 +395,13 @@ def lane_close(conn, name):
 
 
 def lane_rename(conn, old, new):
+    """Renames a lane between programs; a running orchestrator's session name can't change, so not mid-work."""
     _active_lane(conn, old)
     _lane_name_ok(new)
+    if conn.execute("SELECT 1 FROM dispatches WHERE lane = ? AND status NOT IN ('closed', 'cancelled')",
+                    (old,)).fetchone():
+        raise Refused("OPEN_WORK", f"lane '{old}' has open dispatches; rename it once they're closed (its running "
+                                   f"orchestrator keeps the name agent:orchestrator-{old})")
     if conn.execute("SELECT 1 FROM lanes WHERE name = ?", (new,)).fetchone():
         raise Refused("NAME_TAKEN", f"a lane called '{new}' already exists")
     conn.execute("UPDATE lanes SET name = ? WHERE name = ?", (new, old))  # repos and items follow (ON UPDATE CASCADE)

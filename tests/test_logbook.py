@@ -429,9 +429,13 @@ class LaneTest(unittest.TestCase):
     def test_rename_carries_repositories_items_and_dispatches(self):
         lb.lane_open(self.conn, "android", "build the login fix", items=["https://github.com/o/android/issues/7"])
         lb.dispatch_add(self.conn, "and-1", self.android, "coder:android", lane="android")
+        with self.assertRaises(lb.Refused) as e:                       # not while its orchestrator has work out
+            lb.lane_rename(self.conn, "android", "login-fix")
+        self.assertEqual(e.exception.code, "OPEN_WORK")
+        lb.dispatch_status(self.conn, "and-1", "closed")
         lb.lane_rename(self.conn, "android", "login-fix")
         self.assertEqual(lb.lane_owner(self.conn, self.android), "login-fix")
-        self.assertEqual(lb.show(self.conn, "in-flight")[0]["lane"], "login-fix")
+        self.assertEqual(lb.show(self.conn, "dispatches")[0]["lane"], "login-fix")
         self.assertIn("https://github.com/o/android/issues/7", lb.lanes(self.conn)[0]["items"])
         for bad in ("Login", "x" * 41, "android-g2", ""):
             with self.assertRaises(lb.Refused, msg=bad):
