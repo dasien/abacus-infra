@@ -63,7 +63,8 @@ def agent_view():
     """Agent View's session list, or AgentViewError saying exactly what went wrong (never a silent empty list)."""
     cmd = ["claude", "agents", "--json"]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        # From home: the listing doesn't depend on the folder, and claude refuses to run from a deleted one.
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=Path.home())
     except (OSError, subprocess.SubprocessError) as e:
         why = f"{type(e).__name__}: {e}"
     else:
@@ -265,7 +266,7 @@ def stop(name, conn, force_unsaved=False, reason=None):
         by = caller()
         # Record first: a session stopping itself may be killed before this process could write afterwards.
         logbook.session_event(conn, name, "stopped", by, reason)
-        p = subprocess.run(["claude", "stop", job], capture_output=True, text=True)
+        p = subprocess.run(["claude", "stop", job], capture_output=True, text=True, cwd=Path.home())
         if p.returncode != 0:
             err = p.stderr.strip() or p.stdout.strip()
             logbook.session_event(conn, name, "stop_failed", by, err[:200])
@@ -302,7 +303,8 @@ def prune(keep=1, older_than_hours=0.0, dry_run=False):
     mid-turn as "working"). Durable state lives in the logbook, retros, boards and git, not in these records.
     `claude rm` refuses to delete a worktree holding unsaved work; such records are reported and kept."""
     try:
-        out = subprocess.run(["claude", "agents", "--json", "--all"], capture_output=True, text=True, timeout=60)
+        out = subprocess.run(["claude", "agents", "--json", "--all"], capture_output=True, text=True, timeout=60,
+                             cwd=Path.home())
         sessions = json.loads(out.stdout or "[]")
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         raise Refused("LIST", f"could not list sessions: {e}")

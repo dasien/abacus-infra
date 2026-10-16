@@ -14,6 +14,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from pathlib import Path
 
 from . import config
 
@@ -155,7 +156,8 @@ def wrapped(stdin_text):
 
 def live_sessions():
     try:
-        out = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, timeout=20).stdout
+        out = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, timeout=20,
+                             cwd=Path.home()).stdout
         return [s for s in json.loads(out or "[]") if s.get("pid") and
                 str(s.get("name", "")).startswith(("agent:", "coder:"))]
     except (OSError, ValueError, subprocess.SubprocessError):
