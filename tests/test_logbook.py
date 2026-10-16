@@ -363,3 +363,92 @@ class RecordedOnBeadTest(unittest.TestCase):
                         f'source: y | review: z by 2026-11-01 | ruling: #{rid}'],
                        cwd=repo, check=True, capture_output=True)
         self.assertEqual(cli("ruling", "recorded", str(rid), "--on", bead).returncode, 0)
+
+
+class LaneTest(unittest.TestCase):
+    """0.10.0: independent lanes of work, each with its own orchestrator; one active lane per repository."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = self.tmp.name
+        self.conn = lb.connect(os.path.join(t, "logbook.db"))
+        self.android, self.sdk = os.path.join(t, "android"), os.path.join(t, "sdk")
+        for r in (self.android, self.sdk):
+            os.makedirs(r)
+        lb.worker_upsert(self.conn, "coder:android", self.android)
+        lb.worker_upsert(self.conn, "coder:sdk", self.sdk)
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_lanes_own_their_repositories(self):
+        lb.lane_open(self.conn, "android", "build the login fix", repos=[self.android])
+        lb.lane_open(self.conn, "sdk", "build the heartbeat", repos=[self.sdk])
+        self.assertEqual(lb.lane_owner(self.conn, self.android), "android")
+        with self.assertRaises(lb.Refused) as e:                       # one active lane per repository
+            lb.lane_add(self.conn, "sdk", repos=[self.android])
+        self.assertEqual(e.exception.code, "LANE")
+        with self.assertRaises(lb.Refused) as e:                       # a second lane can't open on it either
+            lb.lane_open(self.conn, "android-2", "something else", repos=[self.android])
+        self.assertEqual(e.exception.code, "LANE")
+        with self.assertRaises(lb.Refused) as e:
+            lb.lane_open(self.conn, "android", "again")
+        self.assertEqual(e.exception.code, "NAME_TAKEN")
+
+    def test_a_dispatch_claims_for_its_lane_and_another_lanes_repo_is_refused(self):
+        lb.lane_open(self.conn, "android", "build the login fix")
+        lb.dispatch_add(self.conn, "and-1", self.android, "coder:android", lane="android",
+                        report_to="agent:orchestrator-android")
+        self.assertEqual(lb.lane_owner(self.conn, self.android), "android")   # claimed by dispatching
+        self.assertIn("and-1", lb.lanes(self.conn)[0]["items"])
+        lb.lane_open(self.conn, "sdk", "build the heartbeat")
+        with self.assertRaises(lb.Refused) as e:
+            lb.dispatch_add(self.conn, "and-2", self.android, "coder:android", lane="sdk")
+        self.assertEqual(e.exception.code, "LANE")
+        with self.assertRaises(lb.Refused) as e:                       # nor without a lane at all
+            lb.dispatch_add(self.conn, "and-3", self.android, "coder:android")
+        self.assertEqual(e.exception.code, "LANE")
+        rows = lb.show(self.conn, "in-flight", lane="android")
+        self.assertEqual([r["bead"] for r in rows], ["and-1"])
+        self.assertEqual(lb.show(self.conn, "in-flight", lane="sdk"), [])
+
+    def test_closing_releases_repositories_but_not_with_open_work(self):
+        lb.lane_open(self.conn, "android", "build the login fix")
+        lb.dispatch_add(self.conn, "and-1", self.android, "coder:android", lane="android")
+        with self.assertRaises(lb.Refused) as e:
+            lb.lane_close(self.conn, "android")
+        self.assertEqual(e.exception.code, "OPEN_WORK")
+        lb.dispatch_status(self.conn, "and-1", "cancelled")
+        lb.lane_close(self.conn, "android")
+        self.assertIsNone(lb.lane_owner(self.conn, self.android))
+        lb.lane_open(self.conn, "sdk-and-android", "joint work", repos=[self.android, self.sdk])  # free again
+        lb.lane_open(self.conn, "android", "a new android program")     # a closed lane's name can be reused
+        self.assertEqual(len(lb.lanes(self.conn)), 2)
+
+    def test_rename_carries_repositories_items_and_dispatches(self):
+        lb.lane_open(self.conn, "android", "build the login fix", items=["https://github.com/o/android/issues/7"])
+        lb.dispatch_add(self.conn, "and-1", self.android, "coder:android", lane="android")
+        lb.lane_rename(self.conn, "android", "login-fix")
+        self.assertEqual(lb.lane_owner(self.conn, self.android), "login-fix")
+        self.assertEqual(lb.show(self.conn, "in-flight")[0]["lane"], "login-fix")
+        self.assertIn("https://github.com/o/android/issues/7", lb.lanes(self.conn)[0]["items"])
+        for bad in ("Login", "x" * 41, "android-g2", ""):
+            with self.assertRaises(lb.Refused, msg=bad):
+                lb.lane_rename(self.conn, "login-fix", bad)
+
+    def test_find_a_lane_by_name_repository_item_or_goal(self):
+        lb.lane_open(self.conn, "android", "build the login fix", repos=[self.android])
+        lb.lane_open(self.conn, "sdk-heartbeat", "build the heartbeat feature", repos=[self.sdk],
+                     items=["https://github.com/dasien/bwcli-rs/issues/1"])
+        names = lambda q: [l["name"] for l in lb.lane_find(self.conn, q)]
+        self.assertEqual(names("how are we doing with the android work?"), ["android"])
+        self.assertEqual(names("the login fix"), ["android"])
+        self.assertEqual(names("dasien/bwcli-rs/issues/1"), ["sdk-heartbeat"])
+        self.assertEqual(names("heartbeat"), ["sdk-heartbeat"])
+        self.assertEqual(names("payments"), [])
+
+    def test_older_logbooks_gain_the_lane_column(self):
+        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(dispatches)")]
+        self.assertIn("lane", cols)
+        self.assertIn("lanes: none", lb.digest(self.conn))

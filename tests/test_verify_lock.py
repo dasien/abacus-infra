@@ -237,6 +237,25 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(cfg["mcpServers"]["abacus-memory"]["command"], str(home / "bin" / "abacus-memory"))
         conn.close(); tmp.cleanup()
 
+    def test_a_lane_orchestrator_launches_from_the_one_entry_and_knows_its_lane(self):
+        tmp = tempfile.TemporaryDirectory()
+        home = Path(tmp.name)
+        orch = home / "agents" / "orchestrator"; orch.mkdir(parents=True)
+        (home / "agents" / "fleet.json").write_text(json.dumps({"workers": {"agent:orchestrator": {
+            "repo": str(orch), "model": "opus", "permission_mode": "auto", "agent": "orchestrator",
+            "lanes": True, "prompt": "/recover"}}}))
+        os.environ["ABACUS_HOME"] = str(home)
+        from abacus_infra import logbook, session
+        conn = logbook.connect(str(home / "lb.db"))
+        cmd = session.start("agent:orchestrator-android", conn, prompt="/recover, then act on the HANDOFF",
+                            dry_run=True)["would_run"]
+        self.assertEqual(cmd[cmd.index("-n") + 1], "agent:orchestrator-android")
+        self.assertTrue(cmd[-1].startswith("You are agent:orchestrator-android, the orchestrator for lane 'android'. "
+                                           "/recover, then act on the HANDOFF"), cmd[-1])
+        with self.assertRaises(session.Refused):                          # not a lane-capable entry
+            session.start("agent:concierge-2", conn, dry_run=True)
+        conn.close(); tmp.cleanup()
+
 
 class VerifyPreconditionsTest(unittest.TestCase):
     def test_failing_precondition_check_blocks_verification(self):
@@ -327,3 +346,24 @@ class PruneSelectionTest(unittest.TestCase):
         # ages at hour 50: o2 is 20h old, o1 is 40h old
         self.assertEqual(ids(session.select_prunable(sessions, keep=1, older_than_hours=24, now_ms=50 * h)), ["o1"])
         self.assertEqual(ids(session.select_prunable(sessions, keep=1, older_than_hours=45, now_ms=50 * h)), [])
+
+
+class LaneSessionNameTest(unittest.TestCase):
+    """0.10.0: lane orchestrators (agent:orchestrator-<lane>) and their successors come from the one fleet entry."""
+
+    FLEET = {"agent:orchestrator": {"repo": "/x/orch", "lanes": True, "generations": True, "prompt": "/recover"},
+             "agent:concierge": {"repo": "/x/conc"},
+             "coder:sdk": {"repo": "/x/sdk"}}
+
+    def test_resolve(self):
+        from abacus_infra.session import resolve
+        f = self.FLEET
+        self.assertEqual(resolve("agent:orchestrator", f), (f["agent:orchestrator"], None))
+        self.assertEqual(resolve("agent:orchestrator-g2", f), (f["agent:orchestrator"], None))
+        self.assertEqual(resolve("agent:orchestrator-android", f), (f["agent:orchestrator"], "android"))
+        self.assertEqual(resolve("agent:orchestrator-sdk-heartbeat", f), (f["agent:orchestrator"], "sdk-heartbeat"))
+        self.assertEqual(resolve("agent:orchestrator-android-g3", f), (f["agent:orchestrator"], "android"))
+        # negative controls: only entries that allow lanes get them, and lane names must be well formed
+        for name in ("agent:concierge-extra", "coder:sdk-2", "agent:orchestrator-Android", "agent:orchestrator-",
+                     "agent:planner-x"):
+            self.assertEqual(resolve(name, f), (None, None), name)

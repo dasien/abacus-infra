@@ -114,14 +114,33 @@ def earned_bypass(repo, entry):
     return verdict == "ADOPTED", f"doctor guards verdict: {verdict}"
 
 
+LANE_PART = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def resolve(name, fleet=None):
+    """(fleet entry, lane or None) for a session name: exact; a handover successor <name>-g<n> of an entry with
+    "generations"; or a lane, <name>-<lane> (and its successors), of an entry with "lanes". (None, None) if unknown."""
+    fleet = config.fleet() if fleet is None else fleet
+    if name in fleet:
+        return fleet[name], None
+    base, m = name, re.match(r"^(.+)-g(\d+)$", name)
+    if m and (fleet.get(m.group(1), {}).get("generations") or any(
+            m.group(1).startswith(k + "-") and v.get("lanes") for k, v in fleet.items())):
+        base = m.group(1)
+        if base in fleet:
+            return fleet[base], None
+    for k, v in fleet.items():
+        if v.get("lanes") and base.startswith(k + "-") and LANE_PART.match(base[len(k) + 1:]):
+            return v, base[len(k) + 1:]
+    return None, None
+
+
 def start(name, conn, prompt=None, dry_run=False, reason=None):
-    fleet = config.fleet()
-    entry = fleet.get(name)
-    m = re.match(r"^(.+)-g(\d+)$", name)
-    if entry is None and m and fleet.get(m.group(1), {}).get("generations"):
-        entry = fleet[m.group(1)]  # a handover successor: same role, new generation name
+    entry, lane = resolve(name)
     if entry is None:
         raise Refused("ROLE", f"{name} is not in the fleet registry ({config.home() / 'agents' / 'fleet.json'})")
+    if lane:  # the session can't see its own name; tell it which lane it is
+        prompt = f"You are {name}, the orchestrator for lane '{lane}'. " + (prompt or entry.get("prompt", "/recover"))
     repo = Path(os.path.expanduser(entry["repo"])).resolve()
     if not repo.is_dir():
         raise Refused("ROLE", f"{name}: repository {repo} does not exist")
@@ -178,7 +197,7 @@ def start(name, conn, prompt=None, dry_run=False, reason=None):
 
 
 def stop(name, conn, force_unsaved=False, reason=None):
-    entry = config.fleet().get(name, {})
+    entry = resolve(name)[0] or {}
     s = find_live(name)
     repo = entry.get("repo") or (s or {}).get("cwd")
     if repo and not force_unsaved:
@@ -252,14 +271,22 @@ def liveness(conn):
     live = {s.get("name"): s for s in live_sessions() if s.get("pid")}
     out = []
     state_map = {"busy": "busy", "idle": "idle", "waiting": "waiting"}
-    for name, entry in sorted(fleet.items()):
+    names = dict(fleet)
+    for name in live:  # lane orchestrators and handover successors aren't in the fleet by name
+        if name and name not in names and resolve(name, fleet)[0] is not None:
+            names[name] = resolve(name, fleet)[0]
+    for name, entry in sorted(names.items()):
         s = live.get(name)
         state = state_map.get((s or {}).get("status"), "idle") if s else "gone"
         known = conn.execute("SELECT mode FROM workers WHERE name = ?", (name,)).fetchone()
         if known:
             logbook.worker_state(conn, name, state)
-        out.append({"name": name, "repo": entry["repo"], "agent_view": (s or {}).get("status", "absent"),
-                    "logbook_state": state, "mode": known["mode"] if known else "unregistered"})
+        row = {"name": name, "repo": entry["repo"], "agent_view": (s or {}).get("status", "absent"),
+               "logbook_state": state, "mode": known["mode"] if known else "unregistered"}
+        lane = resolve(name, fleet)[1]
+        if lane:
+            row["lane"] = lane
+        out.append(row)
     return out
 
 
@@ -293,7 +320,7 @@ def main(argv=None):
         elif a.cmd == "prune":
             res = prune(a.keep, a.older_than, a.dry_run)
         else:
-            entry = config.fleet().get(a.name)
+            entry = resolve(a.name)[0]
             if entry is None:
                 raise Refused("ROLE", f"{a.name} is not in the fleet registry")
             logbook.worker_upsert(conn, a.name, entry["repo"],

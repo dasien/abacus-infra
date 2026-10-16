@@ -129,3 +129,55 @@ class ClockTest(unittest.TestCase):
         conn = logbook.connect(os.path.join(self.tmp.name, "lb.db"))
         self.assertRegex(logbook.digest(conn).splitlines()[0], r"^as of \d{4}-\d\d-\d\d .* UTC")
         conn.close()
+
+
+class LaneStatusTest(unittest.TestCase):
+    """0.10.0: 'how are we doing with the android work?' reports the android lane and nothing about the sdk lane."""
+
+    def setUp(self):
+        from abacus_infra import logbook
+        self.tmp = tempfile.TemporaryDirectory()
+        t = Path(self.tmp.name)
+        os.environ["ABACUS_HOME"] = str(t)
+        os.environ.pop("ABACUS_LOGBOOK_DB", None)
+        (t / "state").mkdir()
+        conn = logbook.connect(str(t / "state" / "logbook.db"))
+        android, sdk = str(t / "android"), str(t / "sdk")
+        logbook.worker_upsert(conn, "coder:android", android)
+        logbook.worker_upsert(conn, "coder:sdk", sdk)
+        logbook.lane_open(conn, "android", "build the login fix")
+        logbook.lane_open(conn, "sdk", "build the heartbeat")
+        logbook.dispatch_add(conn, "and-1", android, "coder:android", lane="android")
+        logbook.dispatch_add(conn, "sdk-1", sdk, "coder:sdk", lane="sdk")
+        conn.close()
+        pages = t / "agents" / "orchestrator" / "pages"
+        pages.mkdir(parents=True)
+        (pages / "decisions-android.md").write_text(
+            "## NEEDS YOU\n\n### and-1: which login provider?\n\n## Program status: RUNNING\n")
+        (pages / "decisions-sdk.md").write_text("## NEEDS YOU\nNone.\n\n## Program status: RUNNING\n")
+        self.saved = status.live_sessions
+        status.live_sessions = lambda: [{"name": "agent:orchestrator-android", "status": "busy"},
+                                        {"name": "agent:orchestrator-sdk", "status": "busy"},
+                                        {"name": "coder:android", "status": "busy"}]
+
+    def tearDown(self):
+        status.live_sessions = self.saved
+        self.tmp.cleanup()
+
+    def test_a_lane_question_gets_only_that_lane(self):
+        out = status.full("android")
+        for want in ("Lane android: build the login fix", "and-1: which login provider?", "and-1 @ coder:android",
+                     "agent:orchestrator-android", "coder:android"):
+            self.assertIn(want, out)
+        for unwanted in ("sdk", "heartbeat"):
+            self.assertNotIn(unwanted, out)
+
+    def test_the_general_answer_has_a_line_per_lane(self):
+        out = status.full()
+        self.assertIn("[android] and-1: which login provider?", out)
+        self.assertIn("  - android: 1 in flight, running, 1 needs you", out)
+        self.assertIn("  - sdk: 1 in flight, running", out)
+
+    def test_status_line_counts_across_lanes_and_unknown_lanes_are_named(self):
+        self.assertEqual(status.line(), "abacus · 2 lanes · 1 needs you · 2 in flight")
+        self.assertIn("No active lane called 'payments'. Active lanes: android, sdk.", status.full("payments"))

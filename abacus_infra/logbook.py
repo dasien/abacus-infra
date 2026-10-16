@@ -18,6 +18,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -56,6 +57,23 @@ CREATE TABLE IF NOT EXISTS programs (
   goal TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active',
   created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS lanes (
+  name TEXT PRIMARY KEY,
+  goal TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'closed')),
+  created_at TEXT NOT NULL,
+  closed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS lane_repos (
+  lane TEXT NOT NULL REFERENCES lanes(name) ON UPDATE CASCADE,
+  repo TEXT NOT NULL,
+  PRIMARY KEY (lane, repo)
+);
+CREATE TABLE IF NOT EXISTS lane_items (
+  lane TEXT NOT NULL REFERENCES lanes(name) ON UPDATE CASCADE,
+  item TEXT NOT NULL,
+  PRIMARY KEY (lane, item)
 );
 CREATE TABLE IF NOT EXISTS dispatches (
   id INTEGER PRIMARY KEY,
@@ -223,6 +241,8 @@ def connect(path=None):
         conn.execute("ALTER TABLE dispatches ADD COLUMN checks TEXT")
     if "requires_verified" not in cols:  # before prerequisites were recorded on the dispatch
         conn.execute("ALTER TABLE dispatches ADD COLUMN requires_verified TEXT")
+    if "lane" not in cols:  # before lanes
+        conn.execute("ALTER TABLE dispatches ADD COLUMN lane TEXT")
     if "reason" not in [r[1] for r in conn.execute("PRAGMA table_info(ruling_records)")]:  # before no-item rulings
         conn.execute("ALTER TABLE ruling_records ADD COLUMN reason TEXT")
     for table in INSERT_ONLY:
@@ -292,9 +312,128 @@ def worker_state(conn, name, state):
 
 # ---------------------------------------------------------------- dispatches
 
+# ---------------------------------------------------------------- lanes
+# A lane is an independent line of work with its own orchestrator (agent:orchestrator-<lane>) and decisions page.
+# A repository belongs to at most one active lane, so lanes never compete for a worker.
+
+LANE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def _repo_key(repo):
+    return os.path.realpath(os.path.expanduser(str(repo)))
+
+
+def _lane_name_ok(name):
+    if not LANE_NAME.match(name or "") or re.search(r"-g\d+$", name):
+        raise Refused("BAD_NAME", f"lane names are lowercase letters, digits and dashes, and can't end in -g<n> "
+                                  f"(that names a handover successor): {name!r}")
+
+
+def lane_owner(conn, repo):
+    r = conn.execute("SELECT lr.lane FROM lane_repos lr JOIN lanes l ON l.name = lr.lane "
+                     "WHERE l.status = 'active' AND lr.repo = ?", (_repo_key(repo),)).fetchone()
+    return r["lane"] if r else None
+
+
+def _claim(conn, name, repos, items):
+    for repo in repos:
+        owner = lane_owner(conn, repo)
+        if owner and owner != name:
+            raise Refused("LANE", f"{_repo_key(repo)} belongs to the active lane '{owner}'; give this work to that "
+                                  f"lane, or wait until it closes")
+    for repo in repos:
+        conn.execute("INSERT OR IGNORE INTO lane_repos(lane, repo) VALUES (?, ?)", (name, _repo_key(repo)))
+    for item in items:
+        conn.execute("INSERT OR IGNORE INTO lane_items(lane, item) VALUES (?, ?)", (name, item))
+
+
+def lane_open(conn, name, goal, repos=(), items=()):
+    _lane_name_ok(name)
+    if not (goal or "").strip():
+        raise Refused("NO_GOAL", "a lane needs its goal (the operator's words that started it)")
+    row = conn.execute("SELECT status FROM lanes WHERE name = ?", (name,)).fetchone()
+    if row and row["status"] == "active":
+        raise Refused("NAME_TAKEN", f"an active lane is already called '{name}'; pick a more specific name")
+    for repo in repos:  # check before writing anything
+        owner = lane_owner(conn, repo)
+        if owner:
+            raise Refused("LANE", f"{_repo_key(repo)} belongs to the active lane '{owner}'; give this work to that "
+                                  f"lane, or wait until it closes")
+    if row:  # a closed lane's name is reused: the old dispatches keep their history
+        conn.execute("UPDATE lanes SET goal = ?, status = 'active', created_at = ?, closed_at = NULL WHERE name = ?",
+                     (goal, now(), name))
+        conn.execute("DELETE FROM lane_items WHERE lane = ?", (name,))
+    else:
+        conn.execute("INSERT INTO lanes(name, goal, created_at) VALUES (?, ?, ?)", (name, goal, now()))
+    _claim(conn, name, repos, items)
+    conn.commit()
+    return name
+
+
+def _active_lane(conn, name):
+    row = conn.execute("SELECT status FROM lanes WHERE name = ?", (name,)).fetchone()
+    if not row or row["status"] != "active":
+        raise Refused("NO_LANE", f"no active lane called '{name}'")
+
+
+def lane_add(conn, name, repos=(), items=()):
+    _active_lane(conn, name)
+    _claim(conn, name, repos, items)
+    conn.commit()
+
+
+def lane_close(conn, name):
+    _active_lane(conn, name)
+    open_ = [r["bead"] for r in conn.execute(
+        "SELECT bead FROM dispatches WHERE lane = ? AND status NOT IN ('closed', 'cancelled')", (name,))]
+    if open_:
+        raise Refused("OPEN_WORK", f"lane '{name}' still has open dispatches: {', '.join(open_)}; close or cancel "
+                                   f"them first")
+    conn.execute("UPDATE lanes SET status = 'closed', closed_at = ? WHERE name = ?", (now(), name))
+    conn.execute("DELETE FROM lane_repos WHERE lane = ?", (name,))  # release its repositories
+    conn.commit()
+
+
+def lane_rename(conn, old, new):
+    _active_lane(conn, old)
+    _lane_name_ok(new)
+    if conn.execute("SELECT 1 FROM lanes WHERE name = ?", (new,)).fetchone():
+        raise Refused("NAME_TAKEN", f"a lane called '{new}' already exists")
+    conn.execute("UPDATE lanes SET name = ? WHERE name = ?", (new, old))  # repos and items follow (ON UPDATE CASCADE)
+    conn.execute("UPDATE dispatches SET lane = ? WHERE lane = ?", (new, old))
+    conn.commit()
+
+
+def lanes(conn, include_closed=False):
+    out = []
+    q = "SELECT * FROM lanes" + ("" if include_closed else " WHERE status = 'active'") + " ORDER BY created_at"
+    for l in rows(conn.execute(q)):
+        n = l["name"]
+        l["repos"] = [r[0] for r in conn.execute("SELECT repo FROM lane_repos WHERE lane = ? ORDER BY repo", (n,))]
+        l["items"] = [r[0] for r in conn.execute("SELECT item FROM lane_items WHERE lane = ? ORDER BY item", (n,))]
+        l["in_flight"] = conn.execute("SELECT count(*) FROM dispatches WHERE lane = ? AND status NOT IN "
+                                      "('closed', 'cancelled')", (n,)).fetchone()[0]
+        l["orchestrator"] = f"agent:orchestrator-{n}"
+        out.append(l)
+    return out
+
+
+def lane_find(conn, query):
+    """Active lanes a phrase could mean: by name, a repository's folder name, a bead or source, or the goal's words."""
+    q = query.strip().lower()
+    words = [w for w in re.findall(r"[a-z0-9#/._-]+", q) if len(w) > 2 and w not in ("the", "work", "lane", "with")]
+    hits = []
+    for l in lanes(conn):
+        hay = [l["name"]] + [os.path.basename(r).lower() for r in l["repos"]] + [i.lower() for i in l["items"]]
+        if q in hay or any(w == h or w in h for w in words for h in hay) or \
+                any(w in l["goal"].lower() for w in words if len(w) > 3):
+            hits.append(l)
+    return hits
+
+
 def dispatch_add(conn, bead, repo, worker, pipeline=None, program=None,
                  order_note=None, preconditions=None, report_to="agent:orchestrator",
-                 requires_verified=(), checks=()):
+                 requires_verified=(), checks=(), lane=None):
     """Record a dispatch BEFORE the message is sent. Refusals stop the send."""
     from . import checks as chk
     for c in checks:
@@ -328,6 +467,12 @@ def dispatch_add(conn, bead, repo, worker, pipeline=None, program=None,
         if d is None or d["status"] not in ("verified", "closed") or not d["verified_commit"]:
             raise Refused("PREREQUISITE", f"prerequisite {dep} is not verified; do not release dependants")
         prereqs.append({"bead": dep, "verified_commit": d["verified_commit"]})
+    owner = lane_owner(conn, repo)
+    if owner and owner != lane:
+        raise Refused("LANE", f"{_repo_key(repo)} belongs to the active lane '{owner}'"
+                              + (f", not '{lane}'" if lane else "") + "; that lane's orchestrator dispatches there")
+    if lane:
+        _active_lane(conn, lane)
     missing = [r["id"] for r in conn.execute(COVERING, {"bead": bead})
                if not conn.execute("SELECT 1 FROM ruling_relays WHERE ruling_id = ? AND worker = ?",
                                    (r["id"], worker)).fetchone()]
@@ -337,11 +482,13 @@ def dispatch_add(conn, bead, repo, worker, pipeline=None, program=None,
     ts = now()
     cur = conn.execute(
         "INSERT INTO dispatches(bead, repo, worker, pipeline, program, status, order_note, "
-        "preconditions, report_to, checks, requires_verified, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)",
+        "preconditions, report_to, checks, requires_verified, lane, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)",
         (bead, repo, worker, pipeline, program, order_note, preconditions, report_to,
-         json.dumps(list(checks)) if checks else None, json.dumps(prereqs) if prereqs else None, ts, ts),
+         json.dumps(list(checks)) if checks else None, json.dumps(prereqs) if prereqs else None, lane, ts, ts),
     )
+    if lane:  # the lane now owns this repository (if it didn't already) and tracks the bead
+        _claim(conn, lane, [repo], [bead])
     conn.commit()
     return cur.lastrowid
 
@@ -597,9 +744,9 @@ def handover(conn, action, from_session=None, to_session=None, working_set=None,
 
 VIEWS = {
     "in-flight": "SELECT id, bead, repo, worker, pipeline, status, order_note, preconditions, checks, "
-                 "requires_verified, verified_commit, updated_at FROM dispatches "
+                 "requires_verified, lane, verified_commit, updated_at FROM dispatches "
                  "WHERE status NOT IN ('closed', 'cancelled') ORDER BY id",
-    "dispatches": "SELECT id, bead, worker, status, requires_verified, verified_commit, created_at, verified_at "
+    "dispatches": "SELECT id, bead, worker, status, lane, requires_verified, verified_commit, created_at, verified_at "
                   "FROM dispatches ORDER BY id",
     "overdue": "SELECT id, text, trigger, due_at, work_item FROM promises WHERE status = 'open' "
                "AND due_at IS NOT NULL AND due_at < :now ORDER BY due_at",
@@ -621,10 +768,13 @@ VIEWS = {
 }
 
 
-def show(conn, view):
+def show(conn, view, lane=None):
     if view not in VIEWS:
         raise Refused("BAD_VIEW", f"view must be one of {sorted(VIEWS)}")
-    return rows(conn.execute(VIEWS[view], {"now": now()}))
+    out = rows(conn.execute(VIEWS[view], {"now": now()}))
+    if lane is not None and out and "lane" in out[0]:
+        out = [r for r in out if r["lane"] == lane]
+    return out
 
 
 def digest(conn):
@@ -646,7 +796,9 @@ def digest(conn):
     binding = (f"binds now: fleet {paused} | scope {scope} | operator driving: "
                f"{', '.join(attended) or 'none'} | standing rulings: `abacus-logbook show rulings`, bead notes")
     # Sessions reading this have no clock of their own: say when "now" is, so leases and due dates can be judged.
-    lines = [f"as of {clock()}", counts, binding]
+    active = lanes(conn)
+    lane_line = "lanes: " + (", ".join(f"{l['name']} ({l['in_flight']} in flight)" for l in active) or "none")
+    lines = [f"as of {clock()}", counts, binding, lane_line]
     flight = rows(conn.execute(
         "SELECT bead, worker, status FROM dispatches WHERE status NOT IN ('closed', 'cancelled') ORDER BY id"))
     detail = "in flight: " + "; ".join(f"{d['bead']}@{d['worker']}={d['status']}" for d in flight)
@@ -712,6 +864,19 @@ def build_parser():
     sub.add_parser("digest", help="print the <1 KB session-start digest")
     s = sub.add_parser("show", help="read-only views")
     s.add_argument("view", choices=sorted(VIEWS))
+    s.add_argument("--lane", help="only rows for this lane (views that have a lane column)")
+
+    ln = sub.add_parser("lane", help="independent lines of work, each with its own orchestrator").add_subparsers(
+        dest="verb", required=True)
+    a = ln.add_parser("open"); a.add_argument("name"); a.add_argument("--goal", required=True)
+    a.add_argument("--repo", action="append", default=[]); a.add_argument("--item", action="append", default=[])
+    a = ln.add_parser("add"); a.add_argument("name")
+    a.add_argument("--repo", action="append", default=[]); a.add_argument("--item", action="append", default=[])
+    a = ln.add_parser("close"); a.add_argument("name")
+    a = ln.add_parser("rename"); a.add_argument("old"); a.add_argument("new")
+    a = ln.add_parser("show"); a.add_argument("name", nargs="?"); a.add_argument("--all", action="store_true")
+    a = ln.add_parser("find"); a.add_argument("query")
+    a = ln.add_parser("owner"); a.add_argument("repo")
 
     w = sub.add_parser("worker").add_subparsers(dest="verb", required=True)
     a = w.add_parser("upsert")
@@ -729,6 +894,7 @@ def build_parser():
                    help="bead id whose dispatch must be verified first (repeatable)")
     a.add_argument("--check", action="append", default=[], dest="checks",
                    help="read-only command abacus-verify must see exit 0 in the worker's repo (repeatable)")
+    a.add_argument("--lane", help="the lane dispatching (it claims the repository; another lane's is refused)")
     a = d.add_parser("sent"); a.add_argument("bead")
     a = d.add_parser("status"); a.add_argument("bead"); a.add_argument("status", choices=DISPATCH_STATUSES)
     a = d.add_parser("verify"); a.add_argument("bead")
@@ -801,7 +967,23 @@ def main(argv=None):
         elif n == "digest":
             print(digest(conn))
         elif n == "show":
-            _emit(show(conn, args.view), True)
+            _emit(show(conn, args.view, args.lane), True)
+        elif n == "lane" and v == "open":
+            _emit({"lane": lane_open(conn, args.name, args.goal, args.repo, args.item),
+                   "orchestrator": f"agent:orchestrator-{args.name}"}, True)
+        elif n == "lane" and v == "add":
+            lane_add(conn, args.name, args.repo, args.item); _emit("ok", j)
+        elif n == "lane" and v == "close":
+            lane_close(conn, args.name); _emit("ok", j)
+        elif n == "lane" and v == "rename":
+            lane_rename(conn, args.old, args.new); _emit("ok", j)
+        elif n == "lane" and v == "show":
+            ls = lanes(conn, args.all)
+            _emit([l for l in ls if l["name"] == args.name] if args.name else ls, True)
+        elif n == "lane" and v == "find":
+            _emit(lane_find(conn, args.query), True)
+        elif n == "lane" and v == "owner":
+            _emit({"repo": _repo_key(args.repo), "lane": lane_owner(conn, args.repo)}, True)
         elif n == "worker" and v == "upsert":
             worker_upsert(conn, args.name, args.repo, args.mode, args.started_by, args.state)
             _emit(f"worker {args.name} recorded", j)
@@ -810,7 +992,7 @@ def main(argv=None):
         elif n == "dispatch" and v == "add":
             i = dispatch_add(conn, args.bead, args.repo, args.worker, args.pipeline, args.program,
                              args.order_note, args.preconditions, args.report_to, args.requires_verified,
-                             args.checks)
+                             args.checks, args.lane)
             _emit({"dispatch": i, "status": "queued", "next": "send the message, then `dispatch sent`"}, True)
         elif n == "dispatch" and v == "sent":
             dispatch_status(conn, args.bead, "sent"); _emit("ok", j)
