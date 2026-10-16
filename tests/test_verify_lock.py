@@ -82,6 +82,65 @@ class VerifyTest(unittest.TestCase):
         self.assertIn("commit-on-remote", self.failed(res))
 
 
+class DraftPrVerifyTest(unittest.TestCase):
+    """Draft-pr landing: verified means the bead's commit is the head of its open PR (gh is a fake on PATH)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        git(root, "init", "-q", "--bare", "-b", "main", "remote.git")
+        self.repo = root / "repo"
+        git(root, "clone", "-q", "remote.git", str(self.repo))
+        git(self.repo, "config", "user.email", "t@example.com"); git(self.repo, "config", "user.name", "t")
+        (self.repo / "f.txt").write_text("1")
+        git(self.repo, "add", "f.txt"); git(self.repo, "commit", "-q", "-m", "init")
+        git(self.repo, "push", "-q", "-u", "origin", "main")
+        (self.repo / "f.txt").write_text("2")
+        git(self.repo, "commit", "-q", "-am", "Add a line (a-1)\n\nBead: a-1")
+        self.sha = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/abacus/add-a-line-a-1")
+        git(self.repo, "reset", "-q", "--hard", "HEAD~1")   # the main checkout stays on main, as after a worker run
+        fake = root / "fakebin"; fake.mkdir()
+        (fake / "bd").write_text("#!/bin/sh\necho '[{\"id\": \"a-1\", \"status\": \"closed\"}]'\n")
+        (fake / "gh").write_text("#!/bin/sh\necho \"$*\" >> \"$GH_FAKE_LOG\"\ncat \"$GH_FAKE\"\n")
+        for f in ("bd", "gh"):
+            (fake / f).chmod(0o755)
+        self.pr = root / "pr.json"
+        self.env = {k: os.environ.get(k) for k in ("PATH", "GH_FAKE", "GH_FAKE_LOG")}
+        os.environ.update(PATH=f"{fake}:{os.environ['PATH']}", GH_FAKE=str(self.pr), GH_FAKE_LOG=str(root / "gh.log"))
+        self.gh_log = root / "gh.log"
+        from abacus_infra import verify
+        self.verify = verify
+
+    def tearDown(self):
+        for k, v in self.env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.tmp.cleanup()
+
+    def failed(self, res):
+        return sorted(c["check"] for c in res["checks"] if not c["ok"])
+
+    def test_commit_at_the_head_of_its_open_pr_is_verified(self):
+        self.pr.write_text(json.dumps({"headRefOid": self.sha, "state": "OPEN", "url": "https://github.com/o/r/pull/3"}))
+        res = self.verify.verify(str(self.repo), "a-1", self.sha, landing="draft-pr")
+        self.assertTrue(res["verified"], res["note"])
+        self.assertIn("pr view abacus/add-a-line-a-1", self.gh_log.read_text())
+
+    def test_a_pr_that_moved_on_or_closed_is_not_verified(self):
+        for pr in ({"headRefOid": "f" * 40, "state": "OPEN"}, {"headRefOid": self.sha, "state": "CLOSED"}):
+            self.pr.write_text(json.dumps(pr))
+            res = self.verify.verify(str(self.repo), "a-1", self.sha, landing="draft-pr")
+            self.assertEqual(self.failed(res), ["pr-head"], pr)
+
+    def test_push_mode_still_wants_the_commit_on_the_default_branch(self):
+        self.pr.write_text(json.dumps({"headRefOid": self.sha, "state": "OPEN"}))
+        res = self.verify.verify(str(self.repo), "a-1", self.sha)
+        self.assertIn("commit-on-remote", self.failed(res))
+
+
 class LockTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
