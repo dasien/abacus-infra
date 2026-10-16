@@ -1,0 +1,9 @@
+# Lint for real errors, not style: undefined names, unused imports and variables, syntax errors, and lines over 120.
+# The code's compact one-line statements are deliberate. Extensionless Python scripts in bin/ are included.
+line-length = 120
+target-version = "py39"
+extend-include = ["bin/*"]
+extend-exclude = ["bin/*.sh", "bin/abacus-validate-records"]
+
+[lint]
+select = ["E9", "F", "E501"]

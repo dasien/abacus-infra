@@ -196,7 +196,8 @@ class WorktreeAwarenessTest(unittest.TestCase):
         self.wt = self.repo / ".claude" / "worktrees" / "a-1"
         git(self.repo, "worktree", "add", "-q", str(self.wt), "-b", "worktree-a-1")
         fake = root / "fakebin"; fake.mkdir()
-        (fake / "bd").write_text("#!/bin/sh\necho '[{\"id\": \"a-1\", \"status\": \"closed\"}]'\n"); (fake / "bd").chmod(0o755)
+        (fake / "bd").write_text("#!/bin/sh\necho '[{\"id\": \"a-1\", \"status\": \"closed\"}]'\n")
+        (fake / "bd").chmod(0o755)
         os.environ["PATH"] = f"{fake}:{os.environ['PATH']}"
 
     def tearDown(self):
@@ -219,7 +220,6 @@ class WorktreeAwarenessTest(unittest.TestCase):
 
 class LauncherTest(unittest.TestCase):
     def test_every_session_gets_the_memory_server_and_abacus_on_path(self):
-        import importlib
         tmp = tempfile.TemporaryDirectory()
         home = Path(tmp.name)
         repo = home / "repo"; repo.mkdir()
@@ -250,14 +250,16 @@ class VerifyPreconditionsTest(unittest.TestCase):
         git(repo, "add", "vendor.json"); git(repo, "commit", "-q", "-m", "x\n\nBead: b-1")
         git(repo, "push", "-q", "-u", "origin", "main")
         fake = root / "fakebin"; fake.mkdir()
-        (fake / "bd").write_text("#!/bin/sh\necho '[{\"id\": \"b-1\", \"status\": \"closed\"}]'\n"); (fake / "bd").chmod(0o755)
+        (fake / "bd").write_text("#!/bin/sh\necho '[{\"id\": \"b-1\", \"status\": \"closed\"}]'\n")
+        (fake / "bd").chmod(0o755)
         os.environ["PATH"] = f"{fake}:{os.environ['PATH']}"
         from abacus_infra import verify
         sha = git(repo, "rev-parse", "HEAD")
         self.assertTrue(verify.verify(str(repo), "b-1", sha, preconditions=["grep -q 0db5d96 vendor.json"])["verified"])
         res = verify.verify(str(repo), "b-1", sha, preconditions=["grep -q ffffff vendor.json"])
         self.assertFalse(res["verified"])
-        self.assertEqual([c["check"] for c in res["checks"] if not c["ok"]], ["precondition: grep -q ffffff vendor.json"])
+        self.assertEqual([c["check"] for c in res["checks"] if not c["ok"]],
+                         ["precondition: grep -q ffffff vendor.json"])
         tmp.cleanup()
 
 
@@ -270,7 +272,8 @@ class ChecksReadTheReportedCommitTest(unittest.TestCase):
         git(root, "clone", "-q", "remote.git", str(repo))
         git(repo, "config", "user.email", "t@example.com"); git(repo, "config", "user.name", "t")
         (repo / "core.py").write_text("def slugify(): pass\n")
-        git(repo, "add", "core.py"); git(repo, "commit", "-q", "-m", "init"); git(repo, "push", "-q", "-u", "origin", "main")
+        git(repo, "add", "core.py"); git(repo, "commit", "-q", "-m", "init")
+        git(repo, "push", "-q", "-u", "origin", "main")
         wt = repo / ".claude" / "worktrees" / "a-1"   # the worker lands its change from a worktree
         git(repo, "worktree", "add", "-q", str(wt), "-b", "worktree-a-1")
         (wt / "core.py").write_text("def slugify(): pass\ndef word_count(): pass\n")
@@ -278,7 +281,8 @@ class ChecksReadTheReportedCommitTest(unittest.TestCase):
         sha = git(wt, "rev-parse", "HEAD")
         git(repo, "worktree", "remove", "--force", str(wt))
         fake = root / "fakebin"; fake.mkdir()
-        (fake / "bd").write_text("#!/bin/sh\necho '[{\"id\": \"a-1\", \"status\": \"closed\"}]'\n"); (fake / "bd").chmod(0o755)
+        (fake / "bd").write_text("#!/bin/sh\necho '[{\"id\": \"a-1\", \"status\": \"closed\"}]'\n")
+        (fake / "bd").chmod(0o755)
         os.environ["PATH"] = f"{fake}:{os.environ['PATH']}"
         from abacus_infra import verify
         self.assertNotIn("word_count", (repo / "core.py").read_text())  # the main checkout lags origin

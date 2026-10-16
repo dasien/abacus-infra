@@ -1,0 +1,88 @@
+# Lint this repository; test all four Abacus repositories together (they're installed side by side and
+# depend on each other), with this one at the commit under test and the others at main.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff shellcheck-py
+      - name: ruff (config in ruff.toml)
+        run: ruff check .
+      - name: shellcheck (every tracked script whose first line runs sh or bash)
+        run: |
+          files=$(git ls-files | while read -r f; do
+            case "$f" in *.py|*.md|*.json|*.js|*.toml|*.yml|*.yaml) continue;; esac
+            [ -f "$f" ] && head -1 "$f" | grep -qE '^#!.*(/sh|bash)' && echo "$f"
+          done)
+          if [ -n "$files" ]; then echo "$files" | xargs shellcheck; else echo "no shell scripts"; fi
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, python: "3.9"}
+          - {os: ubuntu-latest, python: "3.12"}
+          - {os: macos-latest, python: "3.12"}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: abacus-infra (this repository)
+        uses: actions/checkout@v4
+        with:
+          path: abacus-infra
+          fetch-depth: 0
+      - name: abacus (main)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/abacus
+          ref: main
+          path: abacus
+          fetch-depth: 0
+      - name: abacus-standards (main)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/abacus-standards
+          ref: main
+          path: abacus-standards
+          fetch-depth: 0
+      - name: abacus-agents (main)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/abacus-agents
+          ref: main
+          path: abacus-agents
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Beads (the tests create real boards)
+        run: npm install -g @beads/bd && bd version
+      - name: git identity and local main branches (some tests clone them)
+        run: |
+          git config --global user.name "Abacus CI"
+          git config --global user.email "ci@example.com"
+          git config --global init.defaultBranch main
+          for r in abacus abacus-standards abacus-infra abacus-agents; do git -C "$r" checkout -q -B main; done
+      - name: tests
+        run: |
+          for r in abacus abacus-standards abacus-infra abacus-agents; do
+            echo "::group::$r"
+            make -C "$r" test || exit 1
+            echo "::endgroup::"
+          done

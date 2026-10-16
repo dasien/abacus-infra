@@ -358,6 +358,8 @@ class RecordedOnBeadTest(unittest.TestCase):
         p = cli("ruling", "recorded", str(rid), "--on", bead)
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("NOT_ON_BEAD", p.stdout + p.stderr)
-        subprocess.run(["bd", "update", bead, "--append-notes", 'STANDING 2026-10-14: words: "approve both" | scope: x | '
-                        f'source: y | review: z by 2026-11-01 | ruling: #{rid}'], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["bd", "update", bead, "--append-notes",
+                        'STANDING 2026-10-14: words: "approve both" | scope: x | '
+                        f'source: y | review: z by 2026-11-01 | ruling: #{rid}'],
+                       cwd=repo, check=True, capture_output=True)
         self.assertEqual(cli("ruling", "recorded", str(rid), "--on", bead).returncode, 0)

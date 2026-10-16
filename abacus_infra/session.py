@@ -241,7 +241,8 @@ def prune(keep=1, older_than_hours=0.0, dry_run=False):
         p = subprocess.run(["claude", "rm", str(s.get("id"))], capture_output=True, text=True)
         (removed if p.returncode == 0 else kept).append(
             label if p.returncode == 0 else f"{label}: {(p.stderr or p.stdout).strip()[:160]}")
-    live = sorted(str(s.get("name")) for s in sessions if s.get("pid") and str(s.get("name", "")).startswith(("agent:", "coder:")))
+    live = sorted(str(s.get("name")) for s in sessions
+                  if s.get("pid") and str(s.get("name", "")).startswith(("agent:", "coder:")))
     return {"would_remove" if dry_run else "removed": removed, "kept_with_unsaved_work": kept, "running": live}
 
 

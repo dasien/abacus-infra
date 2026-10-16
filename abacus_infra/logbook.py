@@ -372,7 +372,8 @@ def dispatch_verify(conn, bead, commit, note):
         raise Refused("NO_EVIDENCE", "verification needs the commit and a note saying what was checked")
     d = _open_dispatch(conn, bead)
     if d["status"] in ("queued", "paused"):
-        raise Refused("NOT_SENT", f"dispatch for {bead} is {d['status']}; it was never sent, so there is nothing to verify")
+        raise Refused("NOT_SENT", f"dispatch for {bead} is {d['status']}; "
+                      "it was never sent, so there is nothing to verify")
     ts = now()
     conn.execute(
         "UPDATE dispatches SET status = 'verified', verified_commit = ?, verified_at = ?, updated_at = ? "
@@ -503,7 +504,8 @@ def ruling_recorded(conn, ruling_id, on, reason=None, notes_of=None):
         if beads:
             raise Refused("HAS_TARGETS", f"ruling {ruling_id} covers {', '.join(beads)}; record it on those beads")
         if not (reason or "").strip():
-            raise Refused("REASON", "a ruling recorded on no bead needs --reason (why there is nothing to record it on)")
+            raise Refused("REASON", "a ruling recorded on no bead needs --reason "
+                          "(why there is nothing to record it on)")
     elif notes_of is not None:
         # 3zg: "recorded on <bead>" must be true - the bead's notes quote the operator's words in a row
         notes = notes_of(on)

@@ -149,7 +149,8 @@ def full():
                 (f": {e['reason']}" if e.get("reason") else "") for e in lb["events"]]
     if lb["recent"]:
         out.append("Recently verified:")
-        out += [f"  - {d['bead']} at {d['verified_commit'][:8]} ({(d.get('verified_at') or '')[:16]})" for d in lb["recent"]]
+        out += [f"  - {d['bead']} at {d['verified_commit'][:8]} ({(d.get('verified_at') or '')[:16]})"
+                for d in lb["recent"]]
     return "\n".join(out)
 
 

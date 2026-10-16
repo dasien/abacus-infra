@@ -118,7 +118,8 @@ def verify(repo, bead, commit, branch="main", remote="origin", preconditions=(),
     rc, out, _ = _run(["git", "status", "--porcelain", "--untracked-files=no"], repo)
     check("tree-clean", rc == 0 and not out, "clean" if not out else f"modified files:\n{out}")
     # A worker isolates each bead in a worktree named after it; if one is still there it must hold nothing unsaved.
-    mine = [(wt, b) for wt, b in worktrees(repo) if b.endswith(f"worktree-{bead}") or wt.rstrip("/").endswith(f"/{bead}")]
+    mine = [(wt, b) for wt, b in worktrees(repo)
+            if b.endswith(f"worktree-{bead}") or wt.rstrip("/").endswith(f"/{bead}")]
     if not mine:
         check("bead-worktree-saved", True, "no worktree left for this bead")
     for wt, branch in mine:
@@ -128,7 +129,8 @@ def verify(repo, bead, commit, branch="main", remote="origin", preconditions=(),
             if remote_sha:
                 _, ahead, _ = _run(["git", "rev-list", "--count", f"{remote_sha}..HEAD"], wt)
             check("bead-worktree-saved", not dirty and ahead in ("", "0"),
-                  f"{wt}: {'dirty' if dirty else 'clean'}, {ahead or 0} commit(s) not on {remote}/{branch_name(branch)}")
+                  f"{wt}: {'dirty' if dirty else 'clean'}, "
+                  f"{ahead or 0} commit(s) not on {remote}/{branch_name(branch)}")
 
     from . import checks as chk
     tree = chk.commit_tree(repo, commit) if preconditions and commit else None
@@ -149,7 +151,8 @@ def verify(repo, bead, commit, branch="main", remote="origin", preconditions=(),
 def main(argv=None):
     p = argparse.ArgumentParser(prog="abacus-verify", description=__doc__.split("\n")[0])
     p.add_argument("--repo", required=True); p.add_argument("--bead", required=True)
-    p.add_argument("--commit"); p.add_argument("--branch", help="default: .abacus/config.json default_branch, else main")
+    p.add_argument("--commit")
+    p.add_argument("--branch", help="default: .abacus/config.json default_branch, else main")
     p.add_argument("--record", action="store_true", help="write the result to the logbook")
     p.add_argument("--check", action="append", default=[], help="extra read-only precondition check (repeatable)")
     a = p.parse_args(argv)

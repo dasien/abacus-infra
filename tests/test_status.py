@@ -7,9 +7,12 @@ from pathlib import Path
 from abacus_infra import status
 
 PAGES = {  # decisions-page shapes the orchestrator actually wrote in runs 2-7
-    "run2_card": ("## NEEDS YOU (1 of cap 5)\n\n### repo-b-759: the worker can't finish\n**Context.** ...\n\n## DECIDED\n", 1, None),
-    "run4_inline": ("## NEEDS YOU 1: follow-up beads for issues coder:repo-b reported\nContext: ...\n\n## DECIDED\n", 1, None),
-    "run5_none": ("## NEEDS YOU\nNone open (cap 5).\n\n## DECIDED\n\n## Program status: COMPLETE\n- a\n", 0, "COMPLETE"),
+    "run2_card": ("## NEEDS YOU (1 of cap 5)\n\n### repo-b-759: the worker can't finish\n"
+                  "**Context.** ...\n\n## DECIDED\n", 1, None),
+    "run4_inline": ("## NEEDS YOU 1: follow-up beads for issues coder:repo-b reported\n"
+                    "Context: ...\n\n## DECIDED\n", 1, None),
+    "run5_none": ("## NEEDS YOU\nNone open (cap 5).\n\n## DECIDED\n\n"
+                  "## Program status: COMPLETE\n- a\n", 0, "COMPLETE"),
     "run6_none": ("## NEEDS YOU\nNone.\n\n## DECIDED\n## Program status\nCOMPLETE\n- repo-a\n", 0, "COMPLETE"),
     "running": ("## NEEDS YOU\nNone.\n\n## Program status\n**RUNNING**: repo-a in flight\n", 0, "RUNNING"),
 }
@@ -121,7 +124,6 @@ class ClockTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_status_and_digest_say_when_now_is(self):
-        import re
         from abacus_infra import logbook
         self.assertRegex(status.full().splitlines()[0], r"^As of \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC \(")
         conn = logbook.connect(os.path.join(self.tmp.name, "lb.db"))
