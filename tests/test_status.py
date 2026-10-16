@@ -14,6 +14,7 @@ PAGES = {  # decisions-page shapes the orchestrator actually wrote in runs 2-7
     "run5_none": ("## NEEDS YOU\nNone open (cap 5).\n\n## DECIDED\n\n"
                   "## Program status: COMPLETE\n- a\n", 0, "COMPLETE"),
     "run6_none": ("## NEEDS YOU\nNone.\n\n## DECIDED\n## Program status\nCOMPLETE\n- repo-a\n", 0, "COMPLETE"),
+    "italic_none": ("## NEEDS YOU\n_None._\n\n## DECIDED (within delegated authority)\n_None._\n", 0, None),
     "running": ("## NEEDS YOU\nNone.\n\n## Program status\n**RUNNING**: repo-a in flight\n", 0, "RUNNING"),
 }
 

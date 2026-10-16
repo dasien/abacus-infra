@@ -63,7 +63,7 @@ def parse_page(text):
         titles = re.findall(r"^###\s+(.+)$", body, re.M)
         if titles:
             cards = titles
-        elif body and not re.match(r"^(\(.*?\)\s*)?none\b", body, re.I):
+        elif body and not re.match(r"^(\(.*?\)\s*)?[_*]*none\b", body, re.I):
             cards = [body.splitlines()[0][:100]]
     if not cards and head and re.search(r"\b[1-9]\d*\b", head.group(1) or "") and "none" not in head.group(1).lower():
         cards = [head.group(1).strip(" :")]
