@@ -348,6 +348,31 @@ class PruneSelectionTest(unittest.TestCase):
         self.assertEqual(ids(session.select_prunable(sessions, keep=1, older_than_hours=45, now_ms=50 * h)), [])
 
 
+class AgentViewFailureTest(unittest.TestCase):
+    """A failed `claude agents --json` is reported (AGENT_VIEW) and logged, never read as "nothing running"."""
+
+    def test_find_live_refuses_and_logs(self):
+        from abacus_infra import session
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            (t / "claude").write_text("#!/bin/sh\necho 'API Error: 401 token revoked' >&2\nexit 1\n")
+            (t / "claude").chmod(0o755)
+            saved = dict(os.environ)
+            os.environ.update(PATH=f"{t}{os.pathsep}{os.environ['PATH']}", ABACUS_HOME=str(t / "home"))
+            os.environ.pop("ABACUS_DEBUG", None)
+            try:
+                with self.assertRaises(session.Refused) as r:
+                    session.find_live("agent:concierge")
+                self.assertEqual(r.exception.code, "AGENT_VIEW")
+                self.assertIn("401 token revoked", str(r.exception))
+                self.assertEqual(session.live_sessions(), [])  # display paths stay best-effort
+                log = (t / "home" / "state" / "agent-view.log").read_text()
+                self.assertEqual(log.count("FAILED: exit 1: API Error: 401 token revoked"), 2)
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+
+
 class LaneSessionNameTest(unittest.TestCase):
     """0.10.0: lane orchestrators (agent:orchestrator-<lane>) and their successors come from the one fleet entry."""
 

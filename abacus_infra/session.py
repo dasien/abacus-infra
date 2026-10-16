@@ -12,6 +12,9 @@ code rather than improvising:
   AUTHORITY  bypassPermissions requested but the repository has not earned it
              (abacus-doctor does not report its guards ADOPTED)
   MODEL      the registry names a model outside the allowed set
+  AGENT_VIEW `claude agents --json` failed, so whether the session is already running is unknown
+
+Every failed Agent View lookup is logged in ~/.abacus/state/agent-view.log; ABACUS_DEBUG=1 also prints each lookup.
 """
 import argparse
 import json
@@ -20,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config, logbook
@@ -34,11 +38,55 @@ class Refused(Exception):
         self.code = code
 
 
-def live_sessions():
+class AgentViewError(Exception):
+    pass
+
+
+def _agent_view_log(line, failed):
+    """Failures always go to state/agent-view.log; with ABACUS_DEBUG=1 every lookup is also printed and logged."""
+    debug = bool(os.environ.get("ABACUS_DEBUG"))
+    if not (failed or debug):
+        return
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    entry = f"{stamp} pid={os.getpid()} {Path(sys.argv[0]).name} {line}"
+    if debug:
+        print(f"[abacus debug] {entry}", file=sys.stderr)
     try:
-        out = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, timeout=30)
-        return json.loads(out.stdout or "[]")
-    except (OSError, ValueError, subprocess.SubprocessError):
+        config.state_dir().mkdir(parents=True, exist_ok=True)
+        with open(config.state_dir() / "agent-view.log", "a") as f:
+            f.write(entry + "\n")
+    except OSError:
+        pass
+
+
+def agent_view():
+    """Agent View's session list, or AgentViewError saying exactly what went wrong (never a silent empty list)."""
+    cmd = ["claude", "agents", "--json"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        why = f"{type(e).__name__}: {e}"
+    else:
+        if out.returncode != 0:
+            why = f"exit {out.returncode}: {(out.stderr or out.stdout).strip()[:500]}"
+        else:
+            try:
+                sessions = json.loads(out.stdout or "[]")
+            except ValueError as e:
+                why = f"unreadable output ({e}): {out.stdout[:300]!r} stderr: {out.stderr.strip()[:300]!r}"
+            else:
+                running = sorted(str(x.get("name")) for x in sessions if x.get("pid"))
+                _agent_view_log(f"claude agents --json: {len(sessions)} listed, running: {running}", failed=False)
+                return sessions
+    _agent_view_log(f"claude agents --json FAILED: {why}", failed=True)
+    raise AgentViewError(why)
+
+
+def live_sessions():
+    """Best-effort list for display and caller lookup; failures are logged by agent_view()."""
+    try:
+        return agent_view()
+    except AgentViewError:
         return []
 
 
@@ -60,8 +108,14 @@ def caller(sessions=None):
 
 
 def find_live(name):
-    """A running session with this name. Stopped sessions stay listed (no pid) so they can be attached later."""
-    return next((s for s in live_sessions() if s.get("name") == name and s.get("pid")), None)
+    """A running session with this name. Stopped sessions stay listed (no pid) so they can be attached later.
+    Refuses rather than guess when Agent View can't be read: guessing "not running" starts a duplicate."""
+    try:
+        sessions = agent_view()
+    except AgentViewError as e:
+        raise Refused("AGENT_VIEW", f"couldn't read Agent View, so can't tell whether {name} is running: {e} "
+                      f"(logged in {config.state_dir() / 'agent-view.log'}; ABACUS_DEBUG=1 shows every lookup)")
+    return next((s for s in sessions if s.get("name") == name and s.get("pid")), None)
 
 
 def _git(repo, *args):
