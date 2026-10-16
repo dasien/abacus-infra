@@ -14,8 +14,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install ruff shellcheck-py
@@ -40,39 +40,46 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: abacus-infra (this repository)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: abacus-infra
           fetch-depth: 0
       - name: abacus (main)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/abacus
           ref: main
           path: abacus
           fetch-depth: 0
       - name: abacus-standards (main)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/abacus-standards
           ref: main
           path: abacus-standards
           fetch-depth: 0
       - name: abacus-agents (main)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/abacus-agents
           ref: main
           path: abacus-agents
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - name: Beads (the tests create real boards)
-        run: npm install -g @beads/bd && bd version
+      - name: Beads (the tests create real boards), via Homebrew on both macOS and Ubuntu
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+            brew install beads
+            # link only bd, so Homebrew's own Python can't shadow the version under test
+            sudo ln -sf "$(brew --prefix)/bin/bd" /usr/local/bin/bd
+          else
+            brew install beads
+          fi
+          bd version
+          python3 --version
       - name: git identity and local main branches (some tests clone them)
         run: |
           git config --global user.name "Abacus CI"
