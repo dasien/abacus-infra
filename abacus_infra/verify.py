@@ -5,6 +5,10 @@ Read-only checks against the worker's repository:
   2. the reported commit is reachable from the remote branch (ls-remote, no fetch)
   3. nothing is left unpushed and the tree is clean
 
+With "landing": "draft-pr" in .abacus/config.json, the remote branch is the bead's own
+(abacus/<slug>-<bead id>), and the commit must also be the head of its open PR
+(`gh pr view`): it reaches the default branch only when someone merges it.
+
 With --record, a passing result is written to the logbook as the dispatch's
 verification; a failing one is recorded against the report as not verified.
 """
@@ -44,8 +48,17 @@ def branch_name(ref):
     return ref.replace("refs/heads/", "") or "detached"
 
 
-def verify(repo, bead, commit, branch="main", remote="origin", preconditions=()):
+def bead_branch(repo, bead, remote="origin"):
+    """The bead's draft-pr branch on the remote, found by its exact id suffix (a-1 never matches a-1.1)."""
+    rc, out, _ = _run(["git", "ls-remote", "--heads", remote, "refs/heads/abacus/*"], repo)
+    names = [line.split("\t", 1)[1][len("refs/heads/"):] for line in out.splitlines() if "\trefs/heads/abacus/" in line]
+    mine = [n for n in names if n.endswith(f"-{bead}")] if rc == 0 else []
+    return mine[0] if len(mine) == 1 else None
+
+
+def verify(repo, bead, commit, branch="main", remote="origin", preconditions=(), landing="push"):
     checks = []
+    default_branch = branch
 
     def check(name, ok, detail):
         checks.append({"check": name, "ok": ok, "detail": detail})
@@ -65,12 +78,16 @@ def verify(repo, bead, commit, branch="main", remote="origin", preconditions=())
     else:
         check("bead-closed", False, f"board unreadable: {err or out}")
 
-    rc, out, err = _run(["git", "ls-remote", remote, f"refs/heads/{branch}"], repo)
+    if landing == "draft-pr":
+        branch = bead_branch(repo, bead, remote)
+    rc, out, err = _run(["git", "ls-remote", remote, f"refs/heads/{branch}"], repo) if branch else (1, "", "")
     remote_sha = out.split()[0] if rc == 0 and out else None
-    check("remote-readable", bool(remote_sha), remote_sha or f"ls-remote failed: {err}")
+    check("remote-readable", bool(remote_sha), remote_sha or (f"ls-remote failed: {err}" if branch else
+                                                              f"no single abacus/*-{bead} branch on {remote}"))
     if remote_sha and commit:
         rc, full, _ = _run(["git", "rev-parse", "--verify", f"{commit}^{{commit}}"], repo)
         if rc != 0:
+            full = None
             check("commit-on-remote", False, f"commit {commit} not found locally; cannot prove ancestry")
         else:
             rc, _, _ = _run(["git", "merge-base", "--is-ancestor", full, remote_sha], repo)
@@ -80,7 +97,22 @@ def verify(repo, bead, commit, branch="main", remote="origin", preconditions=())
             check("commit-names-bead", bead in trailer.split(),
                   f"commit trailer Bead: {trailer or '(none)'} (expected {bead})")
         rc, n, _ = _run(["git", "rev-list", "--count", f"{remote_sha}..HEAD"], repo)
-        check("nothing-unpushed", rc == 0 and n == "0", f"{n} local commit(s) not on {remote}/{branch}")
+        ok = rc == 0 and n == "0"
+        if not ok and landing == "draft-pr":  # the main checkout tracks the default branch, which may be ahead
+            _, dout, _ = _run(["git", "ls-remote", remote, f"refs/heads/{default_branch}"], repo)
+            dsha = dout.split()[0] if dout else ""
+            ok = bool(dsha) and _run(["git", "merge-base", "--is-ancestor", "HEAD", dsha], repo)[0] == 0
+        check("nothing-unpushed", ok, f"{n} local commit(s) not on {remote}/{branch}"
+              + (f" or {remote}/{default_branch}" if landing == "draft-pr" else ""))
+        if landing == "draft-pr":
+            rc, out, err = _run(["gh", "pr", "view", branch, "--json", "headRefOid,state,url"], repo)
+            try:
+                pr = json.loads(out) if rc == 0 else {}
+            except ValueError:
+                pr, err = {}, f"unparseable gh output: {out[:200]}"
+            check("pr-head", bool(full) and pr.get("state") == "OPEN" and pr.get("headRefOid") == full,
+                  f"PR {pr.get('url') or branch}: state={pr.get('state')} head={str(pr.get('headRefOid'))[:12]}"
+                  if pr else f"gh pr view {branch} failed: {err or out}")
     elif not commit:
         check("commit-on-remote", False, "the report named no commit")
     rc, out, _ = _run(["git", "status", "--porcelain", "--untracked-files=no"], repo)
@@ -132,7 +164,11 @@ def main(argv=None):
         pre += [c for c in logbook.dispatch_checks(logbook.connect(), a.bead) if c not in pre]
     except Exception:
         pass
-    res = verify(a.repo, a.bead, a.commit, branch, preconditions=pre)
+    try:
+        landing = json.load(open(os.path.join(a.repo, ".abacus", "config.json"))).get("landing", "push")
+    except (OSError, ValueError):
+        landing = "push"
+    res = verify(a.repo, a.bead, a.commit, branch, preconditions=pre, landing=landing)
     if a.record:
         conn = logbook.connect()
         try:
