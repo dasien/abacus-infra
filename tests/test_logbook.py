@@ -382,6 +382,30 @@ class LaneTest(unittest.TestCase):
         self.conn.close()
         self.tmp.cleanup()
 
+    def test_promises_carry_their_lane(self):
+        """abacus-infra-f8q: one lane's open promise was read as stale by the other lane's orchestrator."""
+        lb.lane_open(self.conn, "android", "build the login fix", repos=[self.android], items=["and-1"])
+        lb.lane_open(self.conn, "sdk", "build the heartbeat", repos=[self.sdk], items=["sdk-1"])
+        mine = lb.promise_add(self.conn, "verify and-1 report", work_item="and-1", lane="android")
+        inferred = lb.promise_add(self.conn, "verify sdk-1 report", work_item="sdk-1")    # forgot --lane
+        loose = lb.promise_add(self.conn, "tidy up", work_item="other-9")
+        self.assertEqual([r["id"] for r in lb.show(self.conn, "asks", lane="android")], [mine])
+        self.assertEqual([r["id"] for r in lb.show(self.conn, "asks", lane="sdk")], [inferred])
+        self.assertIn("open promises 3 (android 1, sdk 1, no lane 1)", lb.digest(self.conn))
+        with self.assertRaises(lb.Refused) as e:                       # a lane can't close owing a promise
+            lb.lane_close(self.conn, "sdk")
+        self.assertEqual(e.exception.code, "OPEN_WORK")
+        self.assertIn(str(inferred), str(e.exception))
+        lb.promise_close(self.conn, inferred, "done", "verified")
+        lb.lane_close(self.conn, "sdk")
+        with self.assertRaises(lb.Refused) as e:                       # only an active lane takes promises
+            lb.promise_add(self.conn, "x", lane="sdk")
+        self.assertEqual(e.exception.code, "NO_LANE")
+        lb.promise_close(self.conn, mine, "done", "verified")
+        lb.lane_rename(self.conn, "android", "login")
+        self.assertEqual(self.conn.execute("SELECT lane FROM promises WHERE id = ?", (mine,)).fetchone()[0], "login")
+        self.assertIsNone(self.conn.execute("SELECT lane FROM promises WHERE id = ?", (loose,)).fetchone()[0])
+
     def test_lanes_own_their_repositories(self):
         lb.lane_open(self.conn, "android", "build the login fix", repos=[self.android])
         lb.lane_open(self.conn, "sdk", "build the heartbeat", repos=[self.sdk])

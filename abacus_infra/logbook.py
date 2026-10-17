@@ -101,7 +101,8 @@ CREATE TABLE IF NOT EXISTS promises (
   work_item TEXT,
   status TEXT NOT NULL DEFAULT 'open',
   resolution TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  lane TEXT
 );
 CREATE TABLE IF NOT EXISTS facts (
   key TEXT PRIMARY KEY,
@@ -243,6 +244,8 @@ def connect(path=None):
         conn.execute("ALTER TABLE dispatches ADD COLUMN requires_verified TEXT")
     if "lane" not in cols:  # before lanes
         conn.execute("ALTER TABLE dispatches ADD COLUMN lane TEXT")
+    if "lane" not in [r[1] for r in conn.execute("PRAGMA table_info(promises)")]:  # before promises had lanes
+        conn.execute("ALTER TABLE promises ADD COLUMN lane TEXT")
     if "reason" not in [r[1] for r in conn.execute("PRAGMA table_info(ruling_records)")]:  # before no-item rulings
         conn.execute("ALTER TABLE ruling_records ADD COLUMN reason TEXT")
     for table in INSERT_ONLY:
@@ -389,6 +392,11 @@ def lane_close(conn, name):
     if open_:
         raise Refused("OPEN_WORK", f"lane '{name}' still has open dispatches: {', '.join(open_)}; close or cancel "
                                    f"them first")
+    owed = [str(r["id"]) for r in conn.execute(
+        "SELECT id FROM promises WHERE lane = ? AND status = 'open'", (name,))]
+    if owed:
+        raise Refused("OPEN_WORK", f"lane '{name}' still has open promises: {', '.join(owed)}; mark them done or "
+                                   f"drop them first")
     conn.execute("UPDATE lanes SET status = 'closed', closed_at = ? WHERE name = ?", (now(), name))
     conn.execute("DELETE FROM lane_repos WHERE lane = ?", (name,))  # release its repositories
     conn.commit()
@@ -406,6 +414,7 @@ def lane_rename(conn, old, new):
         raise Refused("NAME_TAKEN", f"a lane called '{new}' already exists")
     conn.execute("UPDATE lanes SET name = ? WHERE name = ?", (new, old))  # repos and items follow (ON UPDATE CASCADE)
     conn.execute("UPDATE dispatches SET lane = ? WHERE lane = ?", (new, old))
+    conn.execute("UPDATE promises SET lane = ? WHERE lane = ?", (new, old))
     conn.commit()
 
 
@@ -672,10 +681,18 @@ def ruling_recorded(conn, ruling_id, on, reason=None, notes_of=None):
     conn.commit()
 
 
-def promise_add(conn, text, trigger=None, due_at=None, work_item=None):
+def promise_add(conn, text, trigger=None, due_at=None, work_item=None, lane=None):
+    """A promise belongs to a lane, so another lane's orchestrator doesn't read it as stale. Without --lane, a work item
+    that an active lane owns puts the promise in that lane."""
+    if lane is not None:
+        _active_lane(conn, lane)
+    elif work_item:
+        row = conn.execute("SELECT i.lane FROM lane_items i JOIN lanes l ON l.name = i.lane "
+                           "WHERE i.item = ? AND l.status = 'active'", (work_item,)).fetchone()
+        lane = row["lane"] if row else None
     cur = conn.execute(
-        "INSERT INTO promises(text, trigger, due_at, work_item, created_at) VALUES (?, ?, ?, ?, ?)",
-        (text, trigger, due_at, work_item, now()),
+        "INSERT INTO promises(text, trigger, due_at, work_item, created_at, lane) VALUES (?, ?, ?, ?, ?, ?)",
+        (text, trigger, due_at, work_item, now(), lane),
     )
     conn.commit()
     return cur.lastrowid
@@ -753,9 +770,9 @@ VIEWS = {
                  "WHERE status NOT IN ('closed', 'cancelled') ORDER BY id",
     "dispatches": "SELECT id, bead, worker, status, lane, requires_verified, verified_commit, created_at, verified_at "
                   "FROM dispatches ORDER BY id",
-    "overdue": "SELECT id, text, trigger, due_at, work_item FROM promises WHERE status = 'open' "
+    "overdue": "SELECT id, text, trigger, due_at, work_item, lane FROM promises WHERE status = 'open' "
                "AND due_at IS NOT NULL AND due_at < :now ORDER BY due_at",
-    "asks": "SELECT id, text, trigger, due_at, work_item FROM promises WHERE status = 'open' ORDER BY id",
+    "asks": "SELECT id, text, trigger, due_at, work_item, lane FROM promises WHERE status = 'open' ORDER BY id",
     "liveness": "SELECT name, repo, mode, last_state, paused, updated_at FROM workers ORDER BY name",
     "rulings": "SELECT r.id, r.at, r.words, r.said_where, r.question, r.target_item, "
                "(SELECT group_concat(bead, ', ') FROM ruling_targets t WHERE t.ruling_id = r.id) AS targets, "
@@ -789,6 +806,10 @@ def digest(conn):
     inflight = c("SELECT count(*) FROM dispatches WHERE status NOT IN ('closed', 'cancelled')")
     overdue = c("SELECT count(*) FROM promises WHERE status = 'open' AND due_at IS NOT NULL AND due_at < ?", now())
     promises = c("SELECT count(*) FROM promises WHERE status = 'open'")
+    by_lane = conn.execute("SELECT coalesce(lane, 'no lane'), count(*) FROM promises WHERE status = 'open' "
+                           "GROUP BY lane ORDER BY lane IS NULL, lane").fetchall()
+    if any(r[0] != "no lane" for r in by_lane):
+        promises = f"{promises} ({', '.join(f'{r[0]} {r[1]}' for r in by_lane)})"
     rulings = c("SELECT count(*) FROM rulings r WHERE NOT EXISTS "
                 "(SELECT 1 FROM ruling_records rr WHERE rr.ruling_id = r.id)")
     unrelayed = len(conn.execute(UNRELAYED).fetchall())
@@ -922,6 +943,7 @@ def build_parser():
     pr = sub.add_parser("promise").add_subparsers(dest="verb", required=True)
     a = pr.add_parser("add"); a.add_argument("text"); a.add_argument("--trigger")
     a.add_argument("--due-at"); a.add_argument("--work-item")
+    a.add_argument("--lane", help="the lane it belongs to (default: the active lane that owns --work-item)")
     for v in ("done", "drop"):
         a = pr.add_parser(v); a.add_argument("id", type=int); a.add_argument("--resolution", required=True)
 
@@ -1015,7 +1037,7 @@ def main(argv=None):
         elif n == "report" and v == "verified":
             report_verified(conn, args.report_id, not args.failed, args.note); _emit("ok", j)
         elif n == "promise" and v == "add":
-            _emit({"promise": promise_add(conn, args.text, args.trigger, args.due_at, args.work_item)}, True)
+            _emit({"promise": promise_add(conn, args.text, args.trigger, args.due_at, args.work_item, args.lane)}, True)
         elif n == "promise":
             promise_close(conn, args.id, "done" if v == "done" else "dropped", args.resolution); _emit("ok", j)
         elif n == "ruling" and v == "add":
