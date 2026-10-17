@@ -65,6 +65,9 @@ def agent_view():
     try:
         # From home: the listing doesn't depend on the folder, and claude refuses to run from a deleted one.
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=Path.home())
+    except FileNotFoundError:  # no claude installed: nothing can be running (a start fails later, as LAUNCH)
+        _agent_view_log("claude agents --json: claude is not installed; no sessions", failed=False)
+        return []
     except (OSError, subprocess.SubprocessError) as e:
         why = f"{type(e).__name__}: {e}"
     else:

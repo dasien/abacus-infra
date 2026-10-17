@@ -368,6 +368,8 @@ class AgentViewFailureTest(unittest.TestCase):
                 self.assertEqual(session.live_sessions(), [])  # display paths stay best-effort
                 log = (t / "home" / "state" / "agent-view.log").read_text()
                 self.assertEqual(log.count("FAILED: exit 1: API Error: 401 token revoked"), 2)
+                os.environ["PATH"] = str(t / "nowhere")  # claude not installed: nothing running, no refusal
+                self.assertIsNone(session.find_live("agent:concierge"))
             finally:
                 os.environ.clear()
                 os.environ.update(saved)
